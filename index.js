@@ -18,7 +18,6 @@ const client = new Client({
   ]
 });
 
-// === CONFIGURAÇÃO ===
 const CONFIG = {
   TOKEN: process.env.TOKEN,
   GUILD_ID: process.env.GUILD_ID,
@@ -40,7 +39,7 @@ const comando = new SlashCommandBuilder()
       .setRequired(false))
   .addAttachmentOption(opt =>
     opt.setName('arquivo')
-      .setDescription('Arquivo .lua')
+      .setDescription('Arquivo .lua ou .txt')
       .setRequired(false));
 
 client.on('ready', async () => {
@@ -90,12 +89,21 @@ async function enviarPastefy(conteudo) {
       body: JSON.stringify({
         content: conteudo,
         title: 'deobf.lua',
-        visibility: 'unlisted'
+        visibility: 'UNLISTED'
       })
     });
+    if (!res.ok) {
+      console.log('Pastefy Erro status:', res.status);
+      return null;
+    }
     const dados = await res.json();
-    return dados.url || `https://pastefy.app/${dados.id}`;
-  } catch { return null; }
+    console.log('Pastefy Resposta:', dados);
+    if (!dados.paste?.id) return null;
+    return dados.paste.raw_url || `https://pastefy.app/${dados.paste.id}`;
+  } catch (e) {
+    console.log('Pastefy Exceção:', e.message);
+    return null;
+  }
 }
 
 const cacheCodigos = new Map();
@@ -119,10 +127,13 @@ client.on('interactionCreate', async int => {
       codigo = await baixarCodigo(linkRaw);
       if (!codigo) return int.editReply('Não consegui ler esse link. Verifique se é um link bruto.');
     } else if (arquivo) {
-      if (!arquivo.name.endsWith('.lua')) return int.editReply('Envie um arquivo .lua');
+      const nomeArquivo = arquivo.name.toLowerCase();
+      if (!nomeArquivo.endsWith('.lua') && !nomeArquivo.endsWith('.txt')) {
+        return int.editReply('Envie um arquivo .lua ou .txt');
+      }
       codigo = await baixarCodigo(arquivo.url);
     } else {
-      return int.editReply('Use: /deobf raw: link ou /deobf arquivo: arquivo.lua');
+      return int.editReply('Use: /deobf raw: link ou /deobf arquivo: arquivo');
     }
 
     cacheCodigos.set(int.user.id, codigo);
@@ -150,13 +161,13 @@ client.on('interactionCreate', async int => {
 
     const preview = res.code.split('\n').slice(0, 5).join('\n');
     const linkPaste = await enviarPastefy(res.code);
-    const arquivo = Buffer.from(res.code, 'utf-8');
+    const arquivoBuffer = Buffer.from(res.code, 'utf-8');
 
     try {
       const dmEmbed = new EmbedBuilder().setDescription(
         `Código enviado na sua dm\n\n\`\`\`lua\n${preview}\n\`\`\`\n${linkPaste ? `Pastefy: ${linkPaste}` : ''}`
       );
-      await int.user.send({ embeds: [dmEmbed], files: [{ attachment: arquivo, name: 'deobf.lua' }] });
+      await int.user.send({ embeds: [dmEmbed], files: [{ attachment: arquivoBuffer, name: 'deobf.lua' }] });
       await int.followUp({ content: 'Código enviado na sua dm', ephemeral: true });
     } catch {
       await int.followUp({ content: 'Não consegui te enviar mensagem direta.', ephemeral: true });
@@ -168,7 +179,7 @@ client.on('interactionCreate', async int => {
         .setAuthor({ name: int.user.tag, iconURL: int.user.displayAvatarURL() })
         .setDescription(`\`\`\`lua\n${preview}\n\`\`\`\n${linkPaste || 'Pastefy indisponível'}`)
         .setTimestamp();
-      await canal.send({ embeds: [logEmbed], files: [{ attachment: arquivo, name: 'deobf.lua' }] }).catch(() => {});
+      await canal.send({ embeds: [logEmbed], files: [{ attachment: arquivoBuffer, name: 'deobf.lua' }] }).catch(() => {});
     }
 
     cacheCodigos.delete(int.user.id);
@@ -176,4 +187,3 @@ client.on('interactionCreate', async int => {
 });
 
 client.login(CONFIG.TOKEN);
-      
