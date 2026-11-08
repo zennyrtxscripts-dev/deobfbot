@@ -25,12 +25,12 @@ const commands = [
 
 const userSessions = new Map();
 
-async function sendMonitorLog(message) {
+async function sendMonitorEmbed(embed) {
   if (!MONITOR_CHANNEL_ID) return;
   try {
     const channel = await client.channels.fetch(MONITOR_CHANNEL_ID);
     if (channel) {
-      await channel.send({ content: message, allowedMentions: { parse: [] } });
+      await channel.send({ embeds: [embed] });
     }
   } catch (e) {
     console.log('Log não enviado:', e.message);
@@ -62,9 +62,18 @@ async function createPastefy(content) {
   }
 }
 
+function getPreview(code, lines = 5) {
+  const allLines = code.split('\n');
+  const previewLines = allLines.slice(0, lines);
+  let preview = previewLines.join('\n');
+  if (allLines.length > lines) {
+    preview += '\n...';
+  }
+  return preview;
+}
+
 client.once(Events.ClientReady, async () => {
   console.log('Bot online como ' + client.user.tag);
-  sendMonitorLog('✅ Bot ligado e pronto!');
 
   if (REGISTER_COMMANDS) {
     try {
@@ -75,10 +84,8 @@ client.once(Events.ClientReady, async () => {
         { body: commands }
       );
       console.log('Comandos registrados! Mude REGISTER_COMMANDS para false agora.');
-      sendMonitorLog('✅ Comandos registrados com sucesso!');
     } catch (error) {
       console.error('Erro ao registrar comandos:', error);
-      sendMonitorLog('❌ Erro ao registrar comandos: ' + error.message);
     }
   }
 });
@@ -91,13 +98,11 @@ client.on(Events.InteractionCreate, async interaction => {
         ephemeral: true
       });
     }
-    sendMonitorLog('⚠️ Acesso negado — Servidor: ' + interaction.guildId + ' | Usuário: ' + interaction.user.tag);
     return;
   }
 
   if (interaction.type === InteractionType.ApplicationCommand) {
     await interaction.deferReply();
-    sendMonitorLog('📥 Comando /deobf usado por ' + interaction.user.tag);
 
     const embed = new EmbedBuilder()
       .setTitle('Selecione o desfuscador')
@@ -127,7 +132,6 @@ client.on(Events.InteractionCreate, async interaction => {
     if (interaction.customId === 'select_moonsec') selectedEngine = 'moonsec';
     if (!selectedEngine) return;
 
-    sendMonitorLog('🔘 ' + interaction.user.tag + ' escolheu: ' + selectedEngine);
     userSessions.set(interaction.user.id, { engine: selectedEngine });
 
     const modal = new ModalBuilder()
@@ -154,9 +158,8 @@ client.on(Events.InteractionCreate, async interaction => {
 
     const code = interaction.fields.getTextInputValue('code');
     const engine = session.engine;
+    const engineName = engine === 'prometheus' ? 'Prometheus' : 'MoonSec V3';
     userSessions.delete(interaction.user.id);
-
-    sendMonitorLog('🔄 Processando ' + engine + ' para ' + interaction.user.tag + ' — ' + code.length + ' caracteres');
 
     try {
       const res = await fetch(API_URL + ENGINE_ROUTES[engine], {
@@ -168,7 +171,6 @@ client.on(Events.InteractionCreate, async interaction => {
       const data = await res.json();
 
       if (!res.ok || !data.ok) {
-        sendMonitorLog('❌ Erro da API: ' + (data.error || 'Erro desconhecido'));
         await interaction.editReply({
           content: 'Erro: ' + (data.error || 'Falha ao processar o código'),
           components: [],
@@ -177,41 +179,46 @@ client.on(Events.InteractionCreate, async interaction => {
         return;
       }
 
-      const engineName = engine === 'prometheus' ? 'Prometheus' : 'MoonSec V3';
       const pasteLink = await createPastefy(data.code);
+      const preview5 = getPreview(data.code, 5);
 
-      sendMonitorLog('✅ Sucesso — ' + engineName + (pasteLink ? ' — ' + pasteLink : ' — enviado na DM'));
+      const logEmbed = new EmbedBuilder()
+        .setTitle('Código Desofuscado')
+        .setColor(0x00ff00)
+        .addFields(
+          { name: 'Usuário', value: interaction.user.tag, inline: true },
+          { name: 'Desofuscador', value: engineName, inline: true },
+          { name: 'Link Pastefy', value: pasteLink || 'Não disponível', inline: false },
+          { name: 'Preview', value: '```lua\n' + preview5 + '\n```', inline: false }
+        )
+        .setTimestamp();
+
+      await sendMonitorEmbed(logEmbed);
 
       try {
-        let dmMessage = '✅ Resultado - ' + engineName + '\n\n';
+        let dmMessage = 'Resultado - ' + engineName + '\n\n';
         if (pasteLink) {
-          dmMessage += '📄 Link: ' + pasteLink + '\n\n';
+          dmMessage += 'Link: ' + pasteLink + '\n\n';
         }
-        const preview = data.code.slice(0, 500);
-        dmMessage += '```lua\n' + preview + '\n```';
-        if (data.code.length > 500) {
-          dmMessage += '\n...(código completo no link)';
-        }
+        dmMessage += '```lua\n' + preview5 + '\n```';
         await interaction.user.send({ content: dmMessage });
       } catch (e) {
-        sendMonitorLog('⚠️ Não foi possível enviar na DM para ' + interaction.user.tag);
+        console.log('Não foi possível enviar na DM');
       }
 
       const confirmEmbed = new EmbedBuilder()
         .setTitle('Código enviado na sua DM')
-        .setColor(0x2b2d31);
-      
+        .setColor(0x2b2d31)
+        .setDescription('Confira sua mensagem direta!');
+
       if (pasteLink) {
-        confirmEmbed.setDescription('Confira sua mensagem direta!\n📄 Link: ' + pasteLink);
-      } else {
-        confirmEmbed.setDescription('Confira sua mensagem direta! ✅');
+        confirmEmbed.setDescription('Confira sua mensagem direta!\nLink: ' + pasteLink);
       }
 
       await interaction.editReply({ embeds: [confirmEmbed], components: [] });
 
     } catch (err) {
       console.error(err);
-      sendMonitorLog('❌ Erro geral: ' + err.message);
       await interaction.editReply({
         content: 'Erro ao conectar com a API. Tente novamente mais tarde.',
         components: [],
