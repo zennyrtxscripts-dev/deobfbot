@@ -1,57 +1,61 @@
-const { Client, GatewayIntentBits, Collection, Events, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, InteractionType } = require('discord.js');
+const { Client, GatewayIntentBits, Events, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, InteractionType } = require('discord.js');
 const { REST, Routes } = require('discord.js');
 
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-  ]
+  intents: [GatewayIntentBits.Guilds]
 });
 
-// ⚙️ CONFIGURAÇÕES
 const ALLOWED_GUILD_ID = '1471596336603205848';
 const API_URL = process.env.API_URL;
+const REGISTER_COMMANDS = process.env.REGISTER_COMMANDS === 'true';
+
 const ENGINE_ROUTES = {
   prometheus: '/api/public/deobfuscate/prometheus',
   moonsec: '/api/public/deobfuscate/moonsec'
 };
 
-const userSessions = new Map();
-
-// Comando /deobf
 const commands = [
   {
     name: 'deobf',
-    description: 'Envia um código ou arquivo para desofuscar',
+    description: 'Envia um código para desofuscar'
   }
 ];
 
-// Inicializar
+const userSessions = new Map();
+
 client.once(Events.ClientReady, async () => {
-  console.log(`✅ Bot online como ${client.user.tag}`);
-  
-  const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
-  await rest.put(
-    Routes.applicationCommands(client.user.id),
-    { body: commands }
-  );
-  console.log('✅ Comandos registrados');
+  console.log('Bot online como ' + client.user.tag);
+
+  if (REGISTER_COMMANDS) {
+    try {
+      const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
+      console.log('Registrando comandos...');
+      await rest.put(
+        Routes.applicationGuildCommands(client.user.id, ALLOWED_GUILD_ID),
+        { body: commands }
+      );
+      console.log('Comandos registrados! Mude REGISTER_COMMANDS para false agora.');
+    } catch (error) {
+      console.error('Erro ao registrar comandos:', error);
+    }
+  } else {
+    console.log('Bot pronto');
+  }
 });
 
-// Verificar acesso
 client.on(Events.InteractionCreate, async interaction => {
   if (interaction.guildId !== ALLOWED_GUILD_ID) {
-    if (interaction.replied || interaction.deferred) return;
-    return interaction.reply({
-      content: 'Acesso negado, entre no servidor oficial\nhttps://discord.gg/pNNdX945zz',
-      ephemeral: true
-    });
+    if (!interaction.replied && !interaction.deferred) {
+      await interaction.reply({
+        content: 'Acesso negado, entre no servidor oficial\nhttps://discord.gg/pNNdX945zz',
+        ephemeral: true
+      });
+    }
+    return;
   }
 
-  // Comando /deobf
   if (interaction.type === InteractionType.ApplicationCommand) {
-    await interaction.deferReply({ ephemeral: false });
+    await interaction.deferReply();
 
     const embed = new EmbedBuilder()
       .setTitle('Selecione o desfuscador')
@@ -73,70 +77,67 @@ client.on(Events.InteractionCreate, async interaction => {
     await interaction.editReply({ embeds: [embed], components: [row] });
   }
 
-  // Botão clicado
   if (interaction.type === InteractionType.MessageComponent) {
     await interaction.deferUpdate();
-    
+
     let selectedEngine;
     if (interaction.customId === 'select_prometheus') selectedEngine = 'prometheus';
-    else if (interaction.customId === 'select_moonsec') selectedEngine = 'moonsec';
-    else return;
+    if (interaction.customId === 'select_moonsec') selectedEngine = 'moonsec';
+    if (!selectedEngine) return;
 
     userSessions.set(interaction.user.id, { engine: selectedEngine });
 
     const modal = new ModalBuilder()
-      .setCustomId(`input_${selectedEngine}`)
+      .setCustomId('input_modal')
       .setTitle('Cole seu código');
-    
+
     const codeInput = new TextInputBuilder()
       .setCustomId('code')
-      .setLabel('Código ofuscado ou link')
+      .setLabel('Código ofuscado')
       .setStyle(TextInputStyle.Paragraph)
       .setRequired(true);
-    
+
     const modalRow = new ActionRowBuilder().addComponents(codeInput);
     modal.addComponents(modalRow);
-    
+
     await interaction.showModal(modal);
   }
 
-  // Modal enviado
   if (interaction.type === InteractionType.ModalSubmit) {
-    await interaction.deferReply({ ephemeral: false });
-    
+    await interaction.deferReply();
+
     const session = userSessions.get(interaction.user.id);
     if (!session) return;
-    
+
     const code = interaction.fields.getTextInputValue('code');
     const engine = session.engine;
     userSessions.delete(interaction.user.id);
 
-    // Chamar API — SEM chave de autorização
     try {
       const res = await fetch(API_URL + ENGINE_ROUTES[engine], {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ code, force: false })
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: code, force: false })
       });
 
       const data = await res.json();
 
       if (!res.ok || !data.ok) {
-        return interaction.editReply({
-          content: `❌ Erro: ${data.error || 'Falha ao processar o código'}`,
+        await interaction.editReply({
+          content: 'Erro: ' + (data.error || 'Falha ao processar o código'),
           components: [],
           embeds: []
         });
+        return;
       }
 
-      // Enviar na DM
+      const engineName = engine === 'prometheus' ? 'Prometheus' : 'MoonSec V3';
+      const preview = data.code.slice(0, 500);
+      const previewText = preview + (data.code.length > 500 ? '\n...(código completo na mensagem abaixo)' : '');
+
       try {
-        const engineName = engine === 'prometheus' ? 'Prometheus' : 'MoonSec V3';
-        const preview = data.code.slice(0, 500) + (data.code.length > 500 ? '\n...(código completo na mensagem abaixo)' : '');
         await interaction.user.send({
-          content: `✅ **Resultado - ${engineName}**\n\n\`\`\`lua\n${preview}\n\`\`\``
+          content: '✅ Resultado - ' + engineName + '\n\n```lua\n' + previewText + '\n```'
         });
         if (data.code.length > 2000) {
           await interaction.user.send({
@@ -145,7 +146,7 @@ client.on(Events.InteractionCreate, async interaction => {
           });
         }
       } catch (e) {
-        console.log('Não consegui enviar na DM');
+        console.log('Não foi possível enviar na DM');
       }
 
       const confirmEmbed = new EmbedBuilder()
@@ -158,7 +159,7 @@ client.on(Events.InteractionCreate, async interaction => {
     } catch (err) {
       console.error(err);
       await interaction.editReply({
-        content: '❌ Erro ao conectar com a API. Tente novamente mais tarde.',
+        content: 'Erro ao conectar com a API. Tente novamente mais tarde.',
         components: [],
         embeds: []
       });
@@ -167,3 +168,4 @@ client.on(Events.InteractionCreate, async interaction => {
 });
 
 client.login(process.env.DISCORD_TOKEN);
+        
