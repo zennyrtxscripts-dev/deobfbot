@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, Events, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, InteractionType } = require('discord.js');
+const { Client, GatewayIntentBits, Events, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, AttachmentBuilder } = require('discord.js');
 const { REST, Routes } = require('discord.js');
 
 const client = new Client({
@@ -16,14 +16,28 @@ const ENGINE_ROUTES = {
   moonsec: '/api/public/deobfuscate/moonsec'
 };
 
+const pendingCodes = new Map();
+
 const commands = [
   {
     name: 'deobf',
-    description: 'Envia um código para desofuscar'
+    description: 'Use um link (Github, Pastebin, Pastefy) ou arquivo .lua/.txt',
+    options: [
+      {
+        name: 'link',
+        type: 3,
+        description: 'Link do Github, Pastebin ou Pastefy',
+        required: false
+      },
+      {
+        name: 'arquivo',
+        type: 11,
+        description: 'Arquivo .lua ou .txt',
+        required: false
+      }
+    ]
   }
 ];
-
-const userSessions = new Map();
 
 async function sendMonitorEmbed(embed) {
   if (!MONITOR_CHANNEL_ID) return;
@@ -38,8 +52,13 @@ async function sendMonitorEmbed(embed) {
 }
 
 async function createPastefy(content) {
+  if (!PASTEFY_KEY) {
+    console.log('Pastefy: CHAVE NAO CONFIGURADA');
+    return null;
+  }
+
   try {
-    const res = await fetch('https://pastefy.app/api/v2/pastes', {
+    const res = await fetch('https://pastefy.app/api/v2/paste', {
       method: 'POST',
       headers: {
         'Authorization': 'Bearer ' + PASTEFY_KEY,
@@ -51,13 +70,28 @@ async function createPastefy(content) {
         visibility: 'UNLISTED'
       })
     });
-    const data = await res.json();
-    if (data && data.id) {
-      return 'https://pastefy.app/' + data.id;
+
+    console.log('Pastefy status:', res.status);
+
+    if (!res.ok) {
+      const errorText = await res.text();
+      console.log('Pastefy ERRO:', res.status, '->', errorText);
+      return null;
     }
-    return null;
+
+    const data = await res.json();
+    console.log('Pastefy resposta recebida');
+
+    if (data && data.paste) {
+      const link = data.paste.raw_url || 'https://pastefy.app/' + data.paste.id + '/raw';
+      console.log('Pastefy CRIADO COM SUCESSO:', link);
+      return link;
+    } else {
+      console.log('Pastefy: resposta sem objeto paste', data);
+      return null;
+    }
   } catch (e) {
-    console.log('Erro no Pastefy:', e);
+    console.log('Pastefy EXCECAO:', e.message);
     return null;
   }
 }
@@ -70,6 +104,30 @@ function getPreview(code, lines = 5) {
     preview += '\n...';
   }
   return preview;
+}
+
+async function fetchFromLink(input) {
+  if (!input) return null;
+  let url = input.trim();
+
+  if (!url.startsWith('http://') && !url.startsWith('https://')) {
+    return null;
+  }
+
+  try {
+    if (url.includes('github.com') && url.includes('/blob/')) {
+      url = url.replace('/blob/', '/raw/');
+    }
+    if (url.includes('pastebin.com/') && !url.includes('/raw/')) {
+      const match = url.match(/pastebin\.com\/(?:raw\/)?([a-zA-Z0-9]+)/);
+      if (match) url = 'https://pastebin.com/raw/' + match[1];
+    }
+    const res = await fetch(url);
+    if (res.ok) return await res.text();
+    return null;
+  } catch (e) {
+    return null;
+  }
 }
 
 client.once(Events.ClientReady, async () => {
@@ -101,8 +159,50 @@ client.on(Events.InteractionCreate, async interaction => {
     return;
   }
 
-  if (interaction.type === InteractionType.ApplicationCommand) {
+  if (interaction.type === 2) {
     await interaction.deferReply();
+
+    const link = interaction.options.getString('link');
+    const arquivo = interaction.options.getAttachment('arquivo');
+    let code = null;
+
+    if (arquivo && link) {
+      await interaction.editReply('Use apenas um: link OU arquivo, não os dois juntos.');
+      return;
+    }
+
+    if (!arquivo && !link) {
+      await interaction.editReply('Use: /deobf link: URL ou anexe um arquivo .lua/.txt no comando.');
+      return;
+    }
+
+    if (arquivo) {
+      const nome = arquivo.name.toLowerCase();
+      if (!nome.endsWith('.lua') && !nome.endsWith('.txt')) {
+        await interaction.editReply('Formato invalido! Envie um arquivo .lua ou .txt');
+        return;
+      }
+      try {
+        const res = await fetch(arquivo.url);
+        code = await res.text();
+      } catch (e) {
+        await interaction.editReply('Nao foi possivel ler o arquivo. Tente novamente.');
+        return;
+      }
+    } else {
+      code = await fetchFromLink(link);
+      if (!code) {
+        await interaction.editReply('Nao foi possivel buscar o conteudo. Verifique se o link é do Github, Pastebin ou Pastefy e tente novamente.');
+        return;
+      }
+    }
+
+    if (!code || code.trim().length === 0) {
+      await interaction.editReply('Nenhum conteudo encontrado. Verifique e tente novamente.');
+      return;
+    }
+
+    pendingCodes.set(interaction.user.id, code);
 
     const embed = new EmbedBuilder()
       .setTitle('Selecione o desfuscador')
@@ -110,54 +210,34 @@ client.on(Events.InteractionCreate, async interaction => {
 
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
-        .setCustomId('select_prometheus')
+        .setCustomId('sel_prometheus')
         .setLabel('Prometheus')
-        .setEmoji('🌻')
         .setStyle(ButtonStyle.Primary),
       new ButtonBuilder()
-        .setCustomId('select_moonsec')
+        .setCustomId('sel_moonsec')
         .setLabel('MoonSec V3')
-        .setEmoji('🌚')
         .setStyle(ButtonStyle.Primary)
     );
 
     await interaction.editReply({ embeds: [embed], components: [row] });
   }
 
-  if (interaction.type === InteractionType.MessageComponent) {
-    let selectedEngine;
-    if (interaction.customId === 'select_prometheus') selectedEngine = 'prometheus';
-    if (interaction.customId === 'select_moonsec') selectedEngine = 'moonsec';
-    if (!selectedEngine) return;
-
-    userSessions.set(interaction.user.id, { engine: selectedEngine });
-
-    const modal = new ModalBuilder()
-      .setCustomId('input_modal')
-      .setTitle('Cole seu código');
-
-    const codeInput = new TextInputBuilder()
-      .setCustomId('code')
-      .setLabel('Código ofuscado')
-      .setStyle(TextInputStyle.Paragraph)
-      .setRequired(true);
-
-    const modalRow = new ActionRowBuilder().addComponents(codeInput);
-    modal.addComponents(modalRow);
-
-    await interaction.showModal(modal);
-  }
-
-  if (interaction.type === InteractionType.ModalSubmit) {
+  if (interaction.type === 3) {
     await interaction.deferUpdate();
 
-    const session = userSessions.get(interaction.user.id);
-    if (!session) return;
+    let engine;
+    if (interaction.customId === 'sel_prometheus') engine = 'prometheus';
+    if (interaction.customId === 'sel_moonsec') engine = 'moonsec';
+    if (!engine) return;
 
-    const code = interaction.fields.getTextInputValue('code');
-    const engine = session.engine;
+    const code = pendingCodes.get(interaction.user.id);
+    if (!code) {
+      await interaction.followUp({ content: 'Sessao expirada. Use /deobf novamente.', ephemeral: true });
+      return;
+    }
+    pendingCodes.delete(interaction.user.id);
+
     const engineName = engine === 'prometheus' ? 'Prometheus' : 'MoonSec V3';
-    userSessions.delete(interaction.user.id);
 
     try {
       const res = await fetch(API_URL + ENGINE_ROUTES[engine], {
@@ -170,7 +250,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
       if (!res.ok || !data.ok) {
         await interaction.editReply({
-          content: 'Erro: ' + (data.error || 'Falha ao processar o código'),
+          content: 'Erro: ' + (data.error || 'Falha ao processar o codigo'),
           components: [],
           embeds: []
         });
@@ -181,12 +261,12 @@ client.on(Events.InteractionCreate, async interaction => {
       const preview5 = getPreview(data.code, 5);
 
       const logEmbed = new EmbedBuilder()
-        .setTitle('Código Desofuscado')
-        .setColor(0x00ff00)
+        .setTitle('Codigo Desofuscado')
+        .setColor(0x000000)
         .addFields(
-          { name: 'Usuário', value: interaction.user.tag, inline: true },
+          { name: 'Usuario', value: interaction.user.tag, inline: true },
           { name: 'Desofuscador', value: engineName, inline: true },
-          { name: 'Link Pastefy', value: pasteLink || 'Não disponível', inline: false },
+          { name: 'Link Pastefy', value: pasteLink || 'Nao disponivel', inline: false },
           { name: 'Preview', value: '```lua\n' + preview5 + '\n```', inline: false }
         )
         .setTimestamp();
@@ -194,25 +274,29 @@ client.on(Events.InteractionCreate, async interaction => {
       await sendMonitorEmbed(logEmbed);
 
       try {
-        let dmMessage = 'Resultado - ' + engineName + '\n\n';
-        if (pasteLink) {
-          dmMessage += 'Link: ' + pasteLink + '\n\n';
-        }
-        dmMessage += '```lua\n' + preview5 + '\n```';
-        await interaction.user.send({ content: dmMessage });
+        const arquivoCompleto = new AttachmentBuilder(Buffer.from(data.code), { name: 'deobf.lua' });
+
+        const dmEmbed = new EmbedBuilder()
+          .setTitle('NovoAprendiz')
+          .setColor(0x000000)
+          .setDescription('Codigo enviado na sua dm\n```lua\n' + preview5 + '\n```\n\nPastefy: ' + (pasteLink || 'Nao disponivel'));
+
+        await interaction.user.send({
+          embeds: [dmEmbed],
+          files: [arquivoCompleto]
+        });
       } catch (e) {
-        console.log('Não foi possível enviar na DM');
+        console.log('Nao foi possivel enviar na DM:', e.message);
+        await interaction.followUp({
+          content: 'Nao consegui enviar a mensagem direta. Verifique se suas DMs estao abertas.',
+          ephemeral: true
+        });
       }
 
       const confirmEmbed = new EmbedBuilder()
-        .setTitle('Código enviado na sua DM')
-        .setColor(0x2b2d31);
-      
-      if (pasteLink) {
-        confirmEmbed.setDescription('Confira sua mensagem direta!\nLink: ' + pasteLink);
-      } else {
-        confirmEmbed.setDescription('Confira sua mensagem direta!');
-      }
+        .setTitle('Codigo enviado na sua DM')
+        .setColor(0x2b2d31)
+        .setDescription('Confira sua mensagem direta!\nArquivo completo enviado como .lua');
 
       await interaction.editReply({ embeds: [confirmEmbed], components: [] });
 
@@ -228,3 +312,4 @@ client.on(Events.InteractionCreate, async interaction => {
 });
 
 client.login(process.env.DISCORD_TOKEN);
+    
