@@ -125,8 +125,6 @@ client.on(Events.InteractionCreate, async interaction => {
   }
 
   if (interaction.type === InteractionType.MessageComponent) {
-    await interaction.deferUpdate();
-
     let selectedEngine;
     if (interaction.customId === 'select_prometheus') selectedEngine = 'prometheus';
     if (interaction.customId === 'select_moonsec') selectedEngine = 'moonsec';
@@ -151,7 +149,7 @@ client.on(Events.InteractionCreate, async interaction => {
   }
 
   if (interaction.type === InteractionType.ModalSubmit) {
-    await interaction.deferReply();
+    await interaction.deferUpdate();
 
     const session = userSessions.get(interaction.user.id);
     if (!session) return;
@@ -208,11 +206,12 @@ client.on(Events.InteractionCreate, async interaction => {
 
       const confirmEmbed = new EmbedBuilder()
         .setTitle('Código enviado na sua DM')
-        .setColor(0x2b2d31)
-        .setDescription('Confira sua mensagem direta!');
-
+        .setColor(0x2b2d31);
+      
       if (pasteLink) {
         confirmEmbed.setDescription('Confira sua mensagem direta!\nLink: ' + pasteLink);
+      } else {
+        confirmEmbed.setDescription('Confira sua mensagem direta!');
       }
 
       await interaction.editReply({ embeds: [confirmEmbed], components: [] });
@@ -229,4 +228,3 @@ client.on(Events.InteractionCreate, async interaction => {
 });
 
 client.login(process.env.DISCORD_TOKEN);
-        
